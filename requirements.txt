@@ -1,6 +1,7 @@
 streamlit
 nltk
 speechrecognition
+pydub
 Pillow
 gTTS
 langchain
