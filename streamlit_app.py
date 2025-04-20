@@ -7,6 +7,7 @@ import nltk
 from nltk.tokenize import word_tokenize
 import streamlit as st
 import speech_recognition as sr
+from pydub import AudioSegment
 from PIL import Image
 from gtts import gTTS
 from langchain.llms import OpenAI
@@ -15,20 +16,18 @@ from langchain.callbacks import StreamlitCallbackHandler
 from langchain.chat_models import JinaChat
 from langchain.tools import DuckDuckGoSearchRun
 
-# Download NLTK data
+# — Download tokenizer once
 nltk.download("punkt")
 
-# ============ CONFIGURATION – insert your keys ============
+# ======== CONFIGURATION – insert your keys here ========
 HUGGINGFACE_API_KEY = "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"
 JINACHAT_API_KEY    = "CTh7GuLXNG6O7SZ8mq9y:121102ad7772ce8418d7c6818e59af102c2131c6e5fcdb01c9052155e21a132c"
-headers = {"Authorization": f"Bearer {HUGGINGFACE_API_KEY}"}
+hf_headers = {"Authorization": f"Bearer {HUGGINGFACE_API_KEY}"}
 
-# ============ HELPERS ============
-
+# ======== HELPERS ========
 def split_into_meaningful_words(text: str) -> str:
     words = word_tokenize(text)
-    meaningful = [w for w in words if w.isalnum()]
-    return ", ".join(meaningful)
+    return ", ".join(w for w in words if w.isalnum())
 
 def text_summarization_query(text: str) -> dict:
     API_URL = "https://api-inference.huggingface.co/models/sshleifer/distilbart-cnn-12-6"
@@ -36,66 +35,61 @@ def text_summarization_query(text: str) -> dict:
         "inputs": text + " -- Please summarize into actionable keywords (max 20 words).",
         "options": {"wait_for_model": True},
     }
-    resp = requests.post(API_URL, headers=headers, json=payload)
-    resp.raise_for_status()
-    return resp.json()
+    r = requests.post(API_URL, headers=hf_headers, json=payload)
+    r.raise_for_status()
+    return r.json()
 
 def text_to_image_query(prompt: str) -> bytes:
     API_URL = "https://api-inference.huggingface.co/models/artificialguybr/IconsRedmond-IconsLoraForSDXL"
     payload = {"inputs": prompt, "options": {"wait_for_model": True}}
-    resp = requests.post(API_URL, headers=headers, json=payload)
-    resp.raise_for_status()
-    return resp.content
+    r = requests.post(API_URL, headers=hf_headers, json=payload)
+    r.raise_for_status()
+    return r.content
 
-# ============ STREAMLIT UI ============
-
+# ======== STREAMLIT UI ========
 st.set_page_config(page_title="DiagnoAI", page_icon="🤖", layout="centered")
 st.title("🤖 DiagnoAI : Health first!")
 
 recognizer = sr.Recognizer()
 
-# Initialize chat history
+# Chat history
 if "messages" not in st.session_state:
     st.session_state.messages = [{"role": "assistant", "content": "How can I help you?"}]
-
-# Show chat history
 for msg in st.session_state.messages:
     st.chat_message(msg["role"]).write(msg["content"])
 
 # Audio uploader
-audio_file = st.file_uploader("Upload your audio file (WAV)", type="wav")
+audio_file = st.file_uploader("Upload your audio file (WAV/MP3/etc.)", type=["wav","mp3","m4a","flac","ogg"])
+if audio_file:
+    # Read raw bytes & show player
+    raw = audio_file.read()
+    st.audio(raw, format=f"audio/{audio_file.type.split('/')[-1]}")
+    
+    # Convert *any* format to pure PCM‑WAV via pydub+ffmpeg
+    audio_buffer = io.BytesIO(raw)
+    sound = AudioSegment.from_file(audio_buffer)
+    pcm_wav = io.BytesIO()
+    sound.export(pcm_wav, format="wav")   # PCM by default
+    pcm_wav.seek(0)
 
-if audio_file is not None:
-    # Read into BytesIO so we can both play and process
-    audio_bytes = audio_file.read()
-    audio_buffer = io.BytesIO(audio_bytes)
-
-    # Play audio
-    st.audio(audio_buffer, format="audio/wav")
-    audio_buffer.seek(0)
-
-    # Transcribe from BytesIO
-    with sr.AudioFile(audio_buffer) as source:
-        audio_data = recognizer.record(source)
+    # Transcribe
+    with sr.AudioFile(pcm_wav) as src:
+        audio_data = recognizer.record(src)
     try:
-        transcribed_text = recognizer.recognize_google(audio_data)
+        text = recognizer.recognize_google(audio_data)
     except sr.RequestError:
         st.error("Could not reach Google Speech API.")
         st.stop()
     except sr.UnknownValueError:
-        st.error("Audio was not clear enough to transcribe.")
+        st.error("Audio not clear enough to transcribe.")
         st.stop()
 
-    # Append & display user message
-    st.session_state.messages.append({"role": "user", "content": transcribed_text})
-    st.chat_message("user").write(transcribed_text)
+    # Append & display user text
+    st.session_state.messages.append({"role": "user", "content": text})
+    st.chat_message("user").write(text)
 
     # Initialize JinaChat agent
-    chat = JinaChat(
-        temperature=0.2,
-        streaming=True,
-        jinachat_api_key=JINACHAT_API_KEY,
-    )
+    chat = JinaChat(temperature=0.2, streaming=True, jinachat_api_key=JINACHAT_API_KEY)
     agent = initialize_agent(
         tools=[DuckDuckGoSearchRun(name="Search")],
         llm=chat,
@@ -106,24 +100,21 @@ if audio_file is not None:
 
     # Get AI response
     with st.chat_message("assistant"):
-        st_cb = StreamlitCallbackHandler(st.container(), expand_new_thoughts=False)
-        response_text = agent.run(st.session_state.messages, callbacks=[st_cb])
-        st.session_state.messages.append({"role": "assistant", "content": response_text})
-        st.write(response_text)
+        cb = StreamlitCallbackHandler(st.container(), expand_new_thoughts=False)
+        reply = agent.run(st.session_state.messages, callbacks=[cb])
+        st.session_state.messages.append({"role": "assistant", "content": reply})
+        st.write(reply)
 
-    # Text‑to‑speech
-    out_file = "output.wav"
-    tts = gTTS(text=response_text, lang="en", slow=False)
-    tts.save(out_file)
-    st.audio(out_file, format="audio/wav")
+    # Text-to-speech
+    out_fp = "output.wav"
+    gTTS(text=reply, lang="en", slow=False).save(out_fp)
+    st.audio(out_fp, format="audio/wav")
 
-    # Summarize and generate image
+    # Summarize & generate image
     with st.spinner("Generating image..."):
-        summary = text_summarization_query(response_text)
-        # distilbart returns a list of dicts
-        summary_text = summary[0].get("summary_text", "") if isinstance(summary, list) else str(summary)
-        keywords = split_into_meaningful_words(summary_text)
-        prompt = f"{keywords}, 1 human, english language, exercise, healthy diet, medicines, vegetables, fruits"
+        summ = text_summarization_query(reply)
+        summ_txt = summ[0].get("summary_text", "") if isinstance(summ, list) else str(summ)
+        kws = split_into_meaningful_words(summ_txt)
+        prompt = f"{kws}, 1 human, english language, exercise, healthy diet, medicines, vegetables, fruits"
         img_bytes = text_to_image_query(prompt)
-        img = Image.open(io.BytesIO(img_bytes))
-        st.image(img, use_column_width=True)
+        st.image(Image.open(io.BytesIO(img_bytes)), use_column_width=True)
