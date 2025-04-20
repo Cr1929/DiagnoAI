@@ -1,8 +1,7 @@
-gtts
-nltk
-openai
 streamlit
+nltk
+speechrecognition
+Pillow
+gTTS
 langchain
 duckduckgo-search
-SpeechRecognition
-langchain_community
